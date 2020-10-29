@@ -1,10 +1,12 @@
 from tkinter import ttk
-import program_logic
 import traceback
 import logging
 import tkinter
 import sys
 
+import pulsectl
+
+import program_logic
 
 logger = logging.getLogger("Main")
 
@@ -22,12 +24,13 @@ sys.excepthook = log_exception_handler
 
 
 def run_gui():
-    palt_gui = PaltGui()
-    palt_gui.run_gui()
+    with pulsectl.Pulse("pulseaudio-loopback-tool") as pulseaudio:
+        palt_gui = PaltGui(pulseaudio)
+        palt_gui.run_gui()
 
 
 class PaltGui:
-    def __init__(self):
+    def __init__(self, pulseaudio: pulsectl.Pulse):
         self.window = tkinter.Tk()
         self.window_name = "PulseAudio Loopback Tool"
         self.global_refresh_button = ttk.Button(self.window, text="Refresh All", command=self.global_refresh)
@@ -38,6 +41,8 @@ class PaltGui:
         self.delete_tab = DeleteModuleTab(self.tab_controller, self.global_refresh)
         self.style = ttk.Style()
         setup_style(self.style)
+
+        self.pulseaudio = pulseaudio
 
         self._configure_window()
         self._configure_refresh_button()
@@ -66,9 +71,9 @@ class PaltGui:
 
     def global_refresh(self):
         logger.info("Global refresh triggered.")
-        source_list = program_logic.get_source_list()
-        sink_list = program_logic.get_sink_list()
-        module_list = program_logic.get_module_list()
+        source_list = program_logic.get_source_list(self.pulseaudio)
+        sink_list = program_logic.get_sink_list(self.pulseaudio)
+        module_list = program_logic.get_module_list(self.pulseaudio)
 
         self.loopback_tab.refresh(source_list, sink_list)
         self.virtual_sink_tab.refresh(module_list)

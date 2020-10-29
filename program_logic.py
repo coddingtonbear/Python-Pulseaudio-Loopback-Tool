@@ -1,7 +1,11 @@
+import re
 import subprocess
 import traceback
 import logging
 import sys
+from typing import Dict, List, Union
+
+import pulsectl
 
 logger = logging.getLogger("Main")
 
@@ -27,28 +31,38 @@ def open_pavucontrol():
     subprocess.Popen("pavucontrol", shell=True, stdout=subprocess.PIPE)
 
 
-def list_sources() -> str:
+def list_sources(pulseaudio: pulsectl.Pulse) -> List[pulsectl.PulseSourceInfo]:
     """
     Shortcut for the pactl list sources short command.
     :return: String output from the command.
     """
-    return subprocess.getoutput("pactl list sources short")
+    return pulseaudio.source_list()
 
 
-def list_sinks() -> str:
+def list_sinks(pulseaudio: pulsectl.Pulse) -> List[pulsectl.PulseSinkInfo]:
     """
     Shortcut for the pactl list sinks short command.
     :return: String output from the command.
     """
-    return subprocess.getoutput("pactl list sinks short")
+    return pulseaudio.sink_list()
 
 
-def list_modules() -> str:
+def list_modules(pulseaudio: pulsectl.Pulse) -> List[pulsectl.PulseModuleInfo]:
     """
     Shortcut for the pactl list modules short command.
     :return: String output from the command.
     """
-    return subprocess.getoutput("pactl list modules short")
+    listable_module_names = [
+        'module-null-sink',
+        'module-loopback',
+        'module-null-source',
+        'module-remap-source',
+    ]
+    return [
+        module for module in
+        pulseaudio.module_list()
+        if module.name in listable_module_names
+    ]
 
 
 """
@@ -56,76 +70,75 @@ Start of information processing.
 """
 
 
-def _short_audio_listing_to_dict(raw_listing_string: str) -> dict:
+def _audio_device_to_dict(device: Union[pulsectl.PulseSourceInfo, pulsectl.PulseSinkInfo]) -> dict:
     """
     Takes a tab separated string in the sequence of "ID Name Driver Specification State" and turns it into a dictionary.
     :param raw_listing_string:
     :return:
     """
-    raw_listing = raw_listing_string.split("\t")
-    if len(raw_listing) == 5:
-        nice_name = "{} {} {}".format(raw_listing[0], raw_listing[1], raw_listing[4])
-        return {"id": raw_listing[0], "name": raw_listing[1], "driver": raw_listing[2], "spec": raw_listing[3],
-                "state": raw_listing[4], "color": color_tag(raw_listing[4]), "nice_name": nice_name}
-    else:
-        logger.warning("The given short audio listing doesn't appear to be right: {}".format(raw_listing_string))
-        return {"id": "BAD", "name": "BAD", "driver": "BAD", "spec": "BAD", "state": "BAD", "color": color_tag("BAD"),
-                "nice_name": "BAD BAD BAD"}
+    return {
+        "id": device.index,
+        "name": device.name,
+        "driver": device.driver,
+        "state": device.state._value,
+        "color": color_tag(device.state._value),
+        "nice_name": f"{device.index} {device.description} {device.state._value.upper()}"
+    }
 
 
-def _short_module_listing_to_dict(raw_listing_string: str) -> dict:
+def get_module_attributes(module: pulsectl.PulseModuleInfo) -> Dict[str, str]:
+    attributes: Dict[str, str] = {}
+
+    matches = re.findall(r'(\S+?)=((?:"[^"+]+")|(?:[^\s]+))', module.argument)
+    for k, v in matches:
+        if v.startswith('"') and v.endswith('"'):
+            v = v[1:-1]
+
+        attributes[k] = v
+
+    return attributes
+
+
+def _module_to_dict(module: pulsectl.PulseModuleInfo) -> Dict:
     """
     Takes a tab separated string with the bare minimum sequence of "ID ModuleType" and if applicable to the program,
     turns it into a filled out dictionary.
     :param raw_listing_string:
     :return:
     """
-    listing = raw_listing_string.split("\t")
-    module_id = listing[0]
-    module_type = listing[1]
-    if module_type == "module-loopback":
-        logger.debug("Found module-loopback")
-        attributes = listing[2].split(" ")
-        if len(attributes) > 1:
-            nice_name = "{} module-loopback {} {}".format(module_id, attributes[1], attributes[0])
-        else:
-            nice_name = "{} module-loopback {}".format(module_id, attributes[0])
-        return {"id": module_id, "name": module_type, "nice_name": nice_name, "color": "#323232"}
-    elif module_type == "module-null-sink":
-        logger.debug("Found module-null-sink")
-        attributes = listing[2].split(" ")
-        nice_name = "{} module-null-sink {}".format(module_id, attributes[0])
-        return {"id": module_id, "name": module_type, "nice_name": nice_name, "color": "#323232"}
-    elif module_type == "module-remap-source":
-        logger.debug("Found module-remap-source")
-        attributes = listing[2].split(" ")
-        nice_name = "{} module-remap-source {} {}".format(module_id, attributes[0], attributes[1])
-        return {"id": module_id, "name": module_type, "nice_name": nice_name, "color": "#323232"}
-    else:
-        return {}
+    printable_attributes = [
+        "sink_name",
+        "source_name",
+        "sink",
+        "source",
+        "master",
+    ]
+
+    attributes = get_module_attributes(module)
+
+    attribute_strings = []
+    for name in printable_attributes:
+        if name not in attributes:
+            continue
+
+        attribute_strings.append(f"{name}={attributes[name]}")
+
+    return {
+        "id": module.index,
+        "name": module.name,
+        "nice_name": f"{module.index} {module.name} {' '.join(attribute_strings)}",
+        "color": "#323232",
+    }
 
 
-def _process_short_list(raw_list_string: str, processing_function) -> list:
-    """
-    Made for processing the output of list_sources() and list_sinks()
-    :param raw_list_string:
-    :return: List of dictionaries
-    """
-    list_of_strings = raw_list_string.split("\n")
-    device_list = list()
-    for string in list_of_strings:
-        output = processing_function(string)
-        if output != {}:
-            device_list.append(processing_function(string))
-    return device_list
-
-
-def color_tag(state: str) -> str:
+def color_tag(raw_state: str) -> str:
     """
     Used to translate a given state to a color usable by tkinter.
     :param state: String
     :return: String color.
     """
+    state = raw_state.upper()
+
     if state == "RUNNING":
         output = "green"
     elif state == "IDLE":
@@ -137,28 +150,28 @@ def color_tag(state: str) -> str:
     return output
 
 
-def get_source_list() -> list:
+def get_source_list(pulseaudio: pulsectl.Pulse) -> List[Dict]:
     """
     Shortcut to getting a list of source dictionaries.
     :return:
     """
-    return _process_short_list(list_sources(), _short_audio_listing_to_dict)
+    return list(map(_audio_device_to_dict, list_sources(pulseaudio)))
 
 
-def get_sink_list() -> list:
+def get_sink_list(pulseaudio: pulsectl.Pulse) -> List[Dict]:
     """
     Shortcut to getting a list of sink dictionaries.
     :return:
     """
-    return _process_short_list(list_sinks(), _short_audio_listing_to_dict)
+    return list(map(_audio_device_to_dict, list_sinks(pulseaudio)))
 
 
-def get_module_list() -> list:
+def get_module_list(pulseaudio: pulsectl.Pulse) -> List[Dict]:
     """
     Shortcut to getting a list of module dictionaries.
     :return:
     """
-    return _process_short_list(list_modules(), _short_module_listing_to_dict)
+    return list(map( _module_to_dict, list_modules(pulseaudio)))
 
 
 """
